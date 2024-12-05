@@ -1,0 +1,440 @@
+import pygame
+import random
+import sys
+import torch
+import torch.nn as nn
+import copy
+from collections import deque
+from time import time
+import math
+
+# 初始化Pygame
+pygame.init()
+
+# 游戏常量
+GAME_WIDTH = 300
+GAME_HEIGHT = 400
+GAMES_PER_ROW = 5
+TOTAL_GAMES = 10
+
+SCREEN_WIDTH = GAME_WIDTH * GAMES_PER_ROW
+SCREEN_HEIGHT = GAME_HEIGHT * ((TOTAL_GAMES + GAMES_PER_ROW - 1) // GAMES_PER_ROW)
+
+PADDLE_WIDTH = 60
+PADDLE_HEIGHT = 10
+BALL_SIZE = 6
+BLOCK_WIDTH = 40
+BLOCK_HEIGHT = 15
+BLOCK_ROWS = 4
+BLOCK_COLS = 6
+
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+RED = (255, 0, 0)
+GREEN = (0, 255, 0)
+BLUE = (0, 0, 255)
+GOLD = (255, 215, 0)
+
+# 创建主屏幕
+screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+pygame.display.set_caption("遗传算法: AI打砖块")
+
+# AI 模型
+class BrickBreakerAI(nn.Module):
+    def __init__(self):
+        super(BrickBreakerAI, self).__init__()
+        self.input_size = 7
+        self.hidden_size = 32
+        self.output_size = 3
+        
+        self.fc1 = nn.Linear(self.input_size, self.hidden_size)
+        self.fc2 = nn.Linear(self.hidden_size, self.hidden_size)
+        self.fc3 = nn.Linear(self.hidden_size, self.output_size)
+        
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        return torch.softmax(self.fc3(x), dim=0)
+    
+    def get_action(self, state):
+        with torch.no_grad():
+            state_tensor = torch.FloatTensor(state)
+            actions = self(state_tensor)
+            return torch.argmax(actions).item()
+
+# 单个游戏实例
+class GameInstance:
+    def __init__(self, offset_x, offset_y):
+        self.offset_x = offset_x
+        self.offset_y = offset_y
+        self.width = GAME_WIDTH
+        self.height = GAME_HEIGHT
+        self.speed_multiplier = 5
+        self.reset()
+
+    def reset(self):
+        self.score = 0
+        self.steps = 0
+        self.hits = 0
+        self.paddle_x = (self.width - PADDLE_WIDTH) // 2
+        self.paddle_y = self.height - 40
+        self.last_paddle_x = self.paddle_x
+        self.idle_steps = 0
+        self.penalties = 0
+        self.idle_timer = 0
+        self.idle_penalty_multiplier = 1
+        self.last_movement_time = time()
+        self.start_time = time()
+        self.time_bonus_multiplier = 1.0
+        self.last_time = pygame.time.get_ticks()
+        self.reset_ball()
+        self.blocks = self.init_blocks()
+        self.game_over = False
+        self.survival_bonus = 0  # 新增：生存奖励
+
+    def reset_ball(self):
+        self.ball_x = self.width // 2
+        self.ball_y = self.height - 60
+        
+        speed = 5
+        min_angle = math.pi / 4
+        max_angle = 3 * math.pi / 4
+        angle = random.uniform(min_angle, max_angle)
+        
+        self.ball_dx = speed * math.cos(angle)
+        self.ball_dy = -speed * math.sin(angle)
+
+    def init_blocks(self):
+        blocks = []
+        for row in range(BLOCK_ROWS):
+            for col in range(BLOCK_COLS):
+                block = {
+                    'rect': pygame.Rect(
+                        col * (BLOCK_WIDTH + 2) + 5,  # x坐标
+                        row * (BLOCK_HEIGHT + 2) + 5,  # y坐标
+                        BLOCK_WIDTH,                   # 砖块宽度
+                        BLOCK_HEIGHT                   # 砖块高度
+                    ),
+                    'row': row,
+                    'points': 10  # 所有砖块统一设置为100分
+                }
+                blocks.append(block)
+        return blocks
+
+
+    def add_new_row(self):
+        new_blocks = []
+        row = 0
+        for col in range(BLOCK_COLS):
+            if random.random() < 0.8:
+                block = {
+                    'rect': pygame.Rect(
+                        col * (BLOCK_WIDTH + 2) + 5,
+                        row * (BLOCK_HEIGHT + 2) + 5,
+                        BLOCK_WIDTH,
+                        BLOCK_HEIGHT
+                    ),
+                    'row': row,
+                    'points': 30  # 新行的基础分数
+                }
+                new_blocks.append(block)
+        return new_blocks
+
+    def calculate_time_bonus(self):
+        elapsed_time = (time() - self.start_time) / 60.0
+        self.time_bonus_multiplier = min(3.0, 10 + (elapsed_time * 0.1))
+        return self.time_bonus_multiplier
+    
+    def calculate_idle_penalty(self):
+        current_time = time()
+        idle_duration = current_time - self.last_movement_time
+        
+        if idle_duration > 1:
+            # 惩罚倍数随时间增加
+            self.idle_penalty_multiplier = min(50, 1 + idle_duration / 2)
+        
+        return int(4*self.idle_penalty_multiplier) #50*self.idle_penalty_multiplier
+    
+    def update_survival_bonus(self):
+        # 每秒增加生存奖励
+        current_time = time()
+        elapsed_time = current_time - self.start_time
+        self.survival_bonus = int(elapsed_time * 1)  # 每秒10分
+
+    def update_paddle(self, action):
+        old_paddle_x = self.paddle_x
+        
+        # 根据action移动挡板
+        if action == 0:  # 左移
+            self.paddle_x = max(0, self.paddle_x - 5)
+        elif action == 2:  # 右移
+            self.paddle_x = min(self.width - PADDLE_WIDTH, self.paddle_x + 5)
+        
+        # 检查挡板是否移动
+        if abs(self.paddle_x - old_paddle_x) > 0.1:
+            self.last_movement_time = time()
+            self.idle_penalty_multiplier = 1  # 重置惩罚倍数
+        else:
+            penalty = self.calculate_idle_penalty()
+            self.score = max(0, self.score - penalty)
+
+    def move_blocks_down(self):
+        for block in self.blocks:
+            block['rect'].y += BLOCK_HEIGHT + 2
+            block['row'] += 1
+            
+            if block['rect'].bottom >= self.paddle_y:
+                self.game_over = True
+                return
+
+        new_blocks = self.add_new_row()
+        self.blocks.extend(new_blocks)
+
+    def update(self, action):
+        if self.game_over:
+            return
+
+        self.steps += 1
+        old_paddle_x = self.paddle_x
+        # 碰撞检测：挡板
+        paddle_rect = pygame.Rect(self.paddle_x, self.paddle_y, PADDLE_WIDTH, PADDLE_HEIGHT)
+        ball_rect = pygame.Rect(self.ball_x, self.ball_y, BALL_SIZE, BALL_SIZE)
+
+        if ball_rect.colliderect(paddle_rect):
+            self.ball_dy = -abs(self.ball_dy)
+            # 根据击中挡板的位置调整反弹角度
+            relative_intersect_x = (self.paddle_x + (PADDLE_WIDTH/2)) - self.ball_x
+            normalized_intersect = relative_intersect_x / (PADDLE_WIDTH/2)
+            bounce_angle = normalized_intersect * math.pi/3  # 最大60度角
+            speed = math.sqrt(self.ball_dx**2 + self.ball_dy**2)
+            self.ball_dx = -speed * math.sin(bounce_angle)
+            self.ball_dy = -speed * math.cos(bounce_angle)
+            self.move_blocks_down()
+            
+            # 添加挡板碰撞奖励
+            paddle_hit_reward = 100  # 可以调整这个值来改变奖励大小
+            self.score += paddle_hit_reward
+            self.hits += 1  # 记录击球次数
+
+        # 更新挡板位置
+        if action == 0:  # 左移
+            self.paddle_x = max(0, self.paddle_x - 8)
+        elif action == 2:  # 右移
+            self.paddle_x = min(self.width - PADDLE_WIDTH, self.paddle_x + 8)
+
+        # 检查移动状态和更新分数
+        if abs(self.paddle_x - old_paddle_x) > 0.1:
+            self.last_movement_time = time()
+        else:
+            penalty = self.calculate_idle_penalty()
+            self.score = max(0, self.score - penalty)
+
+        # 更新时间奖励和生存奖励
+        self.calculate_time_bonus()
+        self.update_survival_bonus()
+        self.score += 10  # 每帧增加1分基础生存分
+
+        # 更新球的位置
+        self.ball_x += self.ball_dx
+        self.ball_y += self.ball_dy
+
+        # 边界检查
+        if self.ball_x <= 0 or self.ball_x >= GAME_WIDTH - BALL_SIZE:
+            self.ball_dx *= -1
+        if self.ball_y <= 0:
+            self.ball_dy *= -1
+        if self.ball_y >= GAME_HEIGHT:
+            self.game_over = True
+
+        # 碰撞检测：挡板
+        paddle_rect = pygame.Rect(self.paddle_x, self.paddle_y, PADDLE_WIDTH, PADDLE_HEIGHT)
+        ball_rect = pygame.Rect(self.ball_x, self.ball_y, BALL_SIZE, BALL_SIZE)
+        
+        if ball_rect.colliderect(paddle_rect):
+            self.ball_dy = -abs(self.ball_dy)
+            # 根据击中挡板的位置调整反弹角度
+            relative_intersect_x = (self.paddle_x + (PADDLE_WIDTH/2)) - self.ball_x
+            normalized_intersect = relative_intersect_x / (PADDLE_WIDTH/2)
+            bounce_angle = normalized_intersect * math.pi/3  # 最大60度角
+            speed = math.sqrt(self.ball_dx**2 + self.ball_dy**2)
+            self.ball_dx = -speed * math.sin(bounce_angle)
+            self.ball_dy = -speed * math.cos(bounce_angle)
+            self.move_blocks_down()
+
+        # 碰撞检测：砖块
+        for block in self.blocks[:]:
+            if ball_rect.colliderect(block['rect']):
+                self.blocks.remove(block)
+                base_score = block['points']
+                bonus_score = int(base_score * self.time_bonus_multiplier)
+                self.hits += bonus_score
+                self.score += bonus_score
+                self.ball_dy *= -1
+                break
+
+    def get_state(self):
+        nearest_block = min(self.blocks, key=lambda b: ((b['rect'].centerx - self.ball_x) ** 2 + 
+                                                       (b['rect'].centery - self.ball_y) ** 2) ** 0.5, 
+                          default=None)
+        nearest_x, nearest_y = (nearest_block['rect'].centerx, nearest_block['rect'].centery) if nearest_block else (GAME_WIDTH / 2, 0)
+        return [
+            self.ball_x / GAME_WIDTH,
+            self.ball_y / GAME_HEIGHT,
+            self.ball_dx / 8,
+            self.ball_dy / 8,
+            self.paddle_x / (GAME_WIDTH - PADDLE_WIDTH),
+            nearest_x / GAME_WIDTH,
+            nearest_y / GAME_HEIGHT
+        ]
+
+    def draw(self, screen):
+        # 绘制游戏边界
+        pygame.draw.rect(screen, WHITE, (self.offset_x, self.offset_y, GAME_WIDTH, GAME_HEIGHT), 2)
+        
+        # 绘制挡板
+        paddle_color = RED if self.idle_penalty_multiplier > 1 else WHITE
+        pygame.draw.rect(screen, paddle_color, 
+                        (self.offset_x + self.paddle_x, 
+                         self.offset_y + self.paddle_y, 
+                         PADDLE_WIDTH, PADDLE_HEIGHT))
+        
+        # 绘制球
+        pygame.draw.circle(screen, WHITE, 
+                         (self.offset_x + self.ball_x, 
+                          self.offset_y + self.ball_y), 
+                         BALL_SIZE)
+        
+        # 绘制砖块
+        for block in self.blocks:
+            color = (
+                min(255, 100 + block['points'] // 2),
+                min(255, 100 + block['points'] // 4),
+                255
+            )
+            pygame.draw.rect(screen, color, 
+                           (self.offset_x + block['rect'].x, 
+                            self.offset_y + block['rect'].y, 
+                            block['rect'].width, 
+                            block['rect'].height))
+        
+        # 绘制得分信息
+        font = pygame.font.Font(None, 24)
+        score_text = font.render(f"Score: {self.score}", True, WHITE)
+        penalty_text = font.render(f"Penalty: x{self.idle_penalty_multiplier:.1f}", True, RED)
+        bonus_text = font.render(f"Time Bonus: x{self.time_bonus_multiplier:.1f}", True, GREEN)
+        survival_text = font.render(f"Survival: +{self.survival_bonus}", True, GOLD)
+        
+        screen.blit(score_text, (self.offset_x + 5, self.offset_y + 5))
+        screen.blit(penalty_text, (self.offset_x + 5, self.offset_y + 25))
+        screen.blit(bonus_text, (self.offset_x + 5, self.offset_y + 45))
+        screen.blit(survival_text, (self.offset_x + 5, self.offset_y + 65))
+
+# GameManager类
+class GameManager:
+    def __init__(self):
+        self.generation = 1
+        self.models = [BrickBreakerAI() for _ in range(TOTAL_GAMES)]
+        self.reset_games()
+        self.best_score = 0
+    
+    def reset_games(self):
+        self.games = [GameInstance((i % GAMES_PER_ROW) * GAME_WIDTH, (i // GAMES_PER_ROW) * GAME_HEIGHT) 
+                     for i in range(TOTAL_GAMES)]
+        self.start_time = time()
+    
+    def update(self):
+        if time() - self.start_time > 30:
+            self.reset_games()
+            return True
+
+        active_games = False
+        for model, game in zip(self.models, self.games):
+            if not game.game_over:
+                active_games = True
+                state = game.get_state()
+                action = model.get_action(state)
+                game.update(action)
+                self.best_score = max(self.best_score, game.score)
+        return active_games
+    
+    def evolve(self):
+        fitness_scores = [(i, game.score) for i, game in enumerate(self.games)]
+        fitness_scores.sort(key=lambda x: x[1], reverse=True)
+        best_models = [copy.deepcopy(self.models[i]) for i, _ in fitness_scores[:2]]
+
+        new_models = best_models.copy()
+        while len(new_models) < TOTAL_GAMES:
+            parent1, parent2 = random.sample(best_models, 2)
+            child = copy.deepcopy(parent1)
+            # 基因交叉
+            for p1, p2 in zip(child.parameters(), parent2.parameters()):
+                if random.random() < 0.5:
+                    p1.data.copy_(p2.data)
+                # 添加突变
+                if random.random() < 0.1:  # 10%的突变概率
+                    p1.data += torch.randn_like(p1.data) * 0.1
+            new_models.append(child)
+        
+        self.models = new_models
+        self.reset_games()
+        self.generation += 1
+    
+    def draw(self):
+        screen.fill(BLACK)
+        for game in self.games:
+            game.draw(screen)
+            
+        # 绘制全局信息
+        font = pygame.font.Font(None, 36)
+        gen_text = font.render(f"Generation: {self.generation}", True, WHITE)
+        best_text = font.render(f"Best Score: {self.best_score}", True, GOLD)
+        time_left = max(0, 30 - (time() - self.start_time))
+        time_text = font.render(f"Time Left: {time_left:.1f}s", True, GREEN)
+        
+        screen.blit(gen_text, (10, 10))
+        screen.blit(best_text, (10, 50))
+        screen.blit(time_text, (10, 90))
+        
+        pygame.display.flip()
+
+def main():
+    manager = GameManager()
+    clock = pygame.time.Clock()
+    running = True
+
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    running = False
+                elif event.key == pygame.K_r:  # 按R键重置游戏
+                    manager = GameManager()
+                elif event.key == pygame.K_SPACE:  # 空格键暂停/继续
+                    paused = not paused if 'paused' in locals() else True
+
+        if 'paused' in locals() and paused:
+            # 如果游戏暂停，只更新显示
+            manager.draw()
+            clock.tick(60)
+            continue
+
+        # 更新游戏状态
+        active_games = manager.update()
+        
+        # 如果所有游戏都结束了，进行进化
+        if not active_games:
+            manager.evolve()
+
+        # 绘制游戏
+        manager.draw()
+        
+        # 控制帧率
+        clock.tick(60)
+
+    pygame.quit()
+    sys.exit()
+
+if __name__ == "__main__":
+    main()
