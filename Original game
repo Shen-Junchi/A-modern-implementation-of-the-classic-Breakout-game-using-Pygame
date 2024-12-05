@@ -1,0 +1,266 @@
+import pygame
+import random
+import sys
+from pygame import mixer
+
+# 初始化 Pygame
+pygame.init()
+mixer.init()
+
+# 游戏常量
+SCREEN_WIDTH = 800
+SCREEN_HEIGHT = 600
+PADDLE_WIDTH = 100
+PADDLE_HEIGHT = 20
+BALL_SIZE = 10
+BLOCK_WIDTH = 80
+BLOCK_HEIGHT = 30
+BLOCK_ROWS = 5
+BLOCK_COLS = 8
+
+# 颜色定义
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+RED = (255, 0, 0)
+GREEN = (0, 255, 0)
+BLUE = (0, 0, 255)
+
+# 创建游戏窗口
+screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+pygame.display.set_caption("打砖块游戏")
+
+class GameState:
+    MENU = "menu"
+    PLAYING = "playing"
+    PAUSED = "paused"
+    GAME_OVER = "game_over"
+
+class Game:
+    def __init__(self):
+        self.state = GameState.MENU
+        self.score = 0
+        
+        # 挡板属性
+        self.paddle_x = SCREEN_WIDTH // 2 - PADDLE_WIDTH // 2
+        self.paddle_y = SCREEN_HEIGHT - 40
+        self.paddle_speed = 8
+        
+        # 球属性
+        self.reset_ball()
+        
+        # 初始化砖块
+        self.blocks = []
+        self.init_blocks()
+        
+        # 加载字体
+        self.font = pygame.font.Font(None, 36)
+        
+        # 加载音效
+        # try:
+        #     self.hit_sound = mixer.Sound("hit.wav")
+        #     self.break_sound = mixer.Sound("break.wav")
+        # except:
+        #     print("音效文件加载失败")
+
+    def generate_new_row(self):
+        """生成新的一行砖块"""
+        new_row = []
+        new_row_times = 0
+        for col in range(BLOCK_COLS):
+            x = col * (BLOCK_WIDTH + 2) + 60
+            y = 50  # 在顶部生成
+            hits = random.randint(0, new_row_times)
+            new_row.append({
+                'rect': pygame.Rect(x, y, BLOCK_WIDTH, BLOCK_HEIGHT),
+                'hits': hits
+            })
+            new_row_times += 1
+        return new_row
+    
+    def move_blocks_down(self):
+        """将所有砖块向下移动一行"""
+        for block in self.blocks:
+            block['rect'].y += BLOCK_HEIGHT + 2
+            # 检查是否有砖块触底
+            if block['rect'].bottom >= self.paddle_y:
+                self.state = GameState.GAME_OVER
+                return
+
+        # 在顶部添加新的一行
+        new_row = self.generate_new_row()
+        self.blocks = new_row + self.blocks
+
+    def init_blocks(self):
+        """初始化砖块"""
+        self.blocks = []
+        for row in range(BLOCK_ROWS):
+            for col in range(BLOCK_COLS):
+                x = col * (BLOCK_WIDTH + 2) + 60
+                y = row * (BLOCK_HEIGHT + 2) + 50
+                hits = random.randint(0, 3)
+                self.blocks.append({
+                    'rect': pygame.Rect(x, y, BLOCK_WIDTH, BLOCK_HEIGHT),
+                    'hits': hits
+                })
+
+    def reset_ball(self):
+        """重置球的位置和速度"""
+        self.ball_x = SCREEN_WIDTH // 2
+        self.ball_y = SCREEN_HEIGHT - 60
+        # 随机决定球的初始方向
+        self.ball_dx = random.choice([-5, 5])
+        self.ball_dy = -5
+
+    def handle_events(self):
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return False
+            
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    if self.state == GameState.PLAYING:
+                        self.state = GameState.PAUSED
+                    elif self.state == GameState.PAUSED:
+                        self.state = GameState.PLAYING
+                
+                if event.key == pygame.K_SPACE:
+                    if self.state == GameState.MENU:
+                        self.state = GameState.PLAYING
+                    elif self.state == GameState.GAME_OVER:
+                        self.__init__()
+                        self.state = GameState.PLAYING
+        return True
+
+    def update(self):
+        if self.state != GameState.PLAYING:
+            return
+
+        # 更新挡板位置
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_LEFT]:
+            self.paddle_x = max(0, self.paddle_x - self.paddle_speed)
+        if keys[pygame.K_RIGHT]:
+            self.paddle_x = min(SCREEN_WIDTH - PADDLE_WIDTH, self.paddle_x + self.paddle_speed)
+
+        # 更新球的位置
+        self.ball_x += self.ball_dx
+        self.ball_y += self.ball_dy
+        
+        # 球碰撞检测
+        # 墙壁碰撞
+        if self.ball_x <= 0 or self.ball_x >= SCREEN_WIDTH - BALL_SIZE:
+            self.ball_dx *= -1
+        if self.ball_y <= 0:
+            self.ball_dy *= -1
+
+        # 球落地检测
+        if self.ball_y >= SCREEN_HEIGHT:
+            self.state = GameState.GAME_OVER
+            return
+
+        # 挡板碰撞
+        paddle_rect = pygame.Rect(self.paddle_x, self.paddle_y, PADDLE_WIDTH, PADDLE_HEIGHT)
+        ball_rect = pygame.Rect(self.ball_x, self.ball_y, BALL_SIZE, BALL_SIZE)
+        
+        if ball_rect.colliderect(paddle_rect):
+            self.ball_dy = -abs(self.ball_dy)  # 确保球向上弹
+            # 根据击中挡板的位置改变球的水平速度
+            relative_x = (self.ball_x - self.paddle_x) / PADDLE_WIDTH
+            self.ball_dx = (relative_x - 0.5) * 10
+            
+            # 当球碰到挡板时，所有砖块下移一层
+            self.move_blocks_down()
+            
+            try:
+                self.hit_sound.play()
+            except:
+                pass
+
+        # 砖块碰撞
+        for block in self.blocks[:]:
+            if block['hits'] == 0:
+                self.blocks.remove(block)
+                continue 
+            if ball_rect.colliderect(block['rect']):
+                block['hits'] -= 1
+                if block['hits'] <= 0:
+                    self.blocks.remove(block)
+                    self.score += 100
+                    try:
+                        self.break_sound.play()
+                    except:
+                        pass
+                self.ball_dy *= -1
+                break
+
+    def draw(self):
+        screen.fill(BLACK)
+
+        if self.state == GameState.MENU:
+            self.draw_menu()
+        elif self.state == GameState.PLAYING or self.state == GameState.PAUSED:
+            self.draw_game()
+            if self.state == GameState.PAUSED:
+                self.draw_pause()
+        elif self.state == GameState.GAME_OVER:
+            self.draw_game_over()
+
+        pygame.display.flip()
+
+    def draw_menu(self):
+        title = self.font.render("打砖块游戏", True, WHITE)
+        start_text = self.font.render("按空格键开始", True, WHITE)
+        screen.blit(title, (SCREEN_WIDTH//2 - title.get_width()//2, SCREEN_HEIGHT//3))
+        screen.blit(start_text, (SCREEN_WIDTH//2 - start_text.get_width()//2, SCREEN_HEIGHT//2))
+
+    def draw_game(self):
+        # 绘制挡板
+        pygame.draw.rect(screen, WHITE, (self.paddle_x, self.paddle_y, PADDLE_WIDTH, PADDLE_HEIGHT))
+        
+        # 绘制球
+        pygame.draw.circle(screen, WHITE, (int(self.ball_x), int(self.ball_y)), BALL_SIZE//2)
+        
+        # 绘制砖块
+        for block in self.blocks:
+            color = (255, 255 - block['hits']*20, 0)  # 根据剩余击打次数改变颜色
+            pygame.draw.rect(screen, color, block['rect'])
+            hits_text = self.font.render(str(block['hits']), True, BLACK)
+            screen.blit(hits_text, (block['rect'].centerx - hits_text.get_width()//2,
+                                  block['rect'].centery - hits_text.get_height()//2))
+        
+        # 绘制分数
+        score_text = self.font.render(f"分数: {self.score}", True, WHITE)
+        screen.blit(score_text, (10, 10))
+
+    def draw_pause(self):
+        pause_text = self.font.render("游戏暂停", True, WHITE)
+        screen.blit(pause_text, (SCREEN_WIDTH//2 - pause_text.get_width()//2, SCREEN_HEIGHT//2))
+
+    def draw_game_over(self):
+        game_over_text = self.font.render("游戏结束", True, WHITE)
+        score_text = self.font.render(f"最终得分: {self.score}", True, WHITE)
+        restart_text = self.font.render("按空格键重新开始", True, WHITE)
+        
+        screen.blit(game_over_text, (SCREEN_WIDTH//2 - game_over_text.get_width()//2, SCREEN_HEIGHT//3))
+        screen.blit(score_text, (SCREEN_WIDTH//2 - score_text.get_width()//2, SCREEN_HEIGHT//2))
+        screen.blit(restart_text, (SCREEN_WIDTH//2 - restart_text.get_width()//2, SCREEN_HEIGHT*2//3))
+
+
+
+def main():
+    clock = pygame.time.Clock()
+    game = Game()
+    
+    running = True
+    while running:
+        running = game.handle_events()
+        game.update()
+        game.draw()
+        clock.tick(60)
+
+    pygame.quit()
+    sys.exit()
+
+
+if __name__ == "__main__":
+    main()
